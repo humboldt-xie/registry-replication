@@ -1,0 +1,13 @@
+replications:
+- name: test
+  source:
+    endpoint: http://127.0.0.1:5000
+    password: 
+    username: 
+  target:
+    endpoint: http://127.0.0.1:5000
+    password: 
+    username: 
+  projects:
+  - "test"
+
