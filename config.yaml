@@ -9,5 +9,5 @@ replications:
     password: 
     username: 
   projects:
-  - "test"
+    #- "test"
 

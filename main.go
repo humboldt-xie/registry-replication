@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	log "github.com/Sirupsen/logrus"
@@ -8,33 +9,61 @@ import (
 	"io/ioutil"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest/schema1"
 	"github.com/docker/distribution/manifest/schema2"
+	"github.com/gin-gonic/gin"
 	"github.com/vmware/harbor/src/common/utils/registry"
 )
 
+//TagStatus ...
+type TagStatus struct {
+	Status string
+}
+
 //Status ...
 type Status struct {
-	Status string
+	mu      *sync.Mutex
+	Status  string
+	Message string
+	Tags    map[string]*TagStatus
+}
+
+//Init ...
+func (st *Status) Init() {
+	st.Tags = make(map[string]*TagStatus)
+}
+
+//Get ...
+func (st *Status) Get(tag string) *TagStatus {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	status := st.Tags[tag]
+	if status == nil {
+		status = &TagStatus{}
+		st.Tags[tag] = status
+	}
+	return status
 }
 
 //Replication ...
 type Replication struct {
-	Name       string
-	Source     Registry
-	Target     Registry
-	Status     map[string]Status
-	Projects   []string
-	Repository []map[string]Status
-	mu         sync.Mutex
+	Name     string
+	Source   Registry
+	Target   Registry
+	Status   map[string]*Status
+	Projects []string
+	//Repository []map[string]Status
+	mu sync.Mutex
 }
 
 //Init ...
 func (rep *Replication) Init() error {
 	rep.Target.Init()
 	rep.Source.Init()
+	rep.Status = make(map[string]*Status)
 	return nil
 }
 
@@ -42,7 +71,13 @@ func (rep *Replication) Init() error {
 func (rep *Replication) GetStatus(r string) *Status {
 	rep.mu.Lock()
 	defer rep.mu.Unlock()
-	return &rep.Status[r]
+	status := rep.Status[r]
+	if status == nil {
+		status = &Status{mu: &rep.mu}
+		status.Init()
+		rep.Status[r] = status
+	}
+	return status
 }
 
 func (rep *Replication) pullManifest(reg *registry.Repository, tag string) (string, distribution.Manifest, error) {
@@ -77,14 +112,25 @@ func (rep *Replication) CopyReposition(name string) error {
 	if err != nil {
 		panic(err)
 	}
+	status := rep.GetStatus(name)
+	for _, sTag := range sTags {
+		tagstatus := status.Get(sTag)
+		if tagstatus.Status == "" {
+			tagstatus.Status = "pending"
+		}
+	}
+	var lastError error
 	//tTags, err := target.ListTag()
 	for _, sTag := range sTags {
+		tagstatus := status.Get(sTag)
+		tagstatus.Status = "coping"
 		var digest [2]string
 		var manifest [2]distribution.Manifest
 		var err [2]error
 		var repo [2]*registry.Repository
 		repo[0] = source
 		repo[1] = target
+		tagstatus.Status = "pullManifest"
 		wg := sync.WaitGroup{}
 		for i := 0; i < 2; i++ {
 			//rep.PullManifest(source, st)
@@ -97,23 +143,35 @@ func (rep *Replication) CopyReposition(name string) error {
 		wg.Wait()
 
 		if err[0] != nil {
-			return err[0]
-		}
-		if err[1] != nil {
-			return err[1]
-		}
-		if digest[0] == digest[1] {
-			log.Infof("manifest %s of %s:%s already exists on the destination registry", digest[0], target.Name, sTag)
+			lastError = err[0]
+			tagstatus.Status = "error"
 			continue
 		}
+		/*if err[1] != nil {
+			lastError = err[1]
+			tagstatus.Status = "error"
+			continue
+		}*/
+		if digest[0] == digest[1] {
+			log.Infof("manifest %s of %s:%s already exists on the destination registry", digest[0], target.Name, sTag)
+			tagstatus.Status = "exists"
+			continue
+		}
+		tagstatus.Status = "copyLayers"
 		if err := rep.transferLayers(source, target, sTag, manifest[0].References()); err != nil {
-			return err
+			lastError = err
+			tagstatus.Status = "error"
+			continue
 		}
+		tagstatus.Status = "pushManifest"
 		if err := rep.pushManifest(target, sTag, digest[0], manifest[0]); err != nil {
-			return err
+			lastError = err
+			tagstatus.Status = "error"
+			continue
 		}
+		tagstatus.Status = "done"
 	}
-	return nil
+	return lastError
 }
 
 func (rep *Replication) pushManifest(target *registry.Repository, tag, digest string, manifest distribution.Manifest) error {
@@ -192,6 +250,9 @@ func (rep *Replication) transferLayers(src, target *registry.Repository, tag str
 }
 
 func (rep *Replication) hasProject(r string) bool {
+	if len(rep.Projects) == 0 {
+		return true
+	}
 	for _, v := range rep.Projects {
 		if strings.Contains(r, v) {
 			return true
@@ -210,26 +271,43 @@ func (rep *Replication) Run() error {
 	if err != nil {
 		panic(err)
 	}
-	repositories, err := reg.Catalog()
-	if err != nil {
-		panic(err)
-	}
-	for _, r := range repositories {
-		rep.GetStatus.Status = "pending"
-	}
-	for _, r := range repositories {
-		if rep.hasProject(r) {
-			rep.CopyReposition(r)
+	for {
+		repositories, err := reg.Catalog()
+		if err != nil {
+			panic(err)
 		}
-	}
-	fmt.Printf("repos %v\n", repositories)
+		for _, r := range repositories {
+			if !rep.hasProject(r) {
+				continue
+			}
+			status := rep.GetStatus(r)
+			if status.Status == "" {
+				status.Status = "pending"
+			}
+		}
+		for _, r := range repositories {
+			if !rep.hasProject(r) {
+				continue
+			}
+			status := rep.GetStatus(r)
+			status.Status = "coping"
+			if err := rep.CopyReposition(r); err != nil {
+				status.Status = "error"
+				status.Message = fmt.Sprintf("%s", err)
+			} else {
+				status.Status = "done"
+			}
+		}
+		fmt.Printf("repos %v\n", repositories)
 
-	repo, err := rep.Source.Repository(repositories[0])
-	if err != nil {
-		panic(err)
+		repo, err := rep.Source.Repository(repositories[0])
+		if err != nil {
+			panic(err)
+		}
+		tags, err := repo.ListTag()
+		fmt.Printf("tag %v\n", tags)
+		time.Sleep(time.Second * 2)
 	}
-	tags, err := repo.ListTag()
-	fmt.Printf("tag %v\n", tags)
 	return nil
 }
 
@@ -263,12 +341,51 @@ func init() {
 
 var config Config
 
+func toJSON(it interface{}) string {
+	jt, _ := json.Marshal(it)
+	return string(jt)
+}
+
+//GetStatus ...
+func GetStatus(c *gin.Context) {
+	rep := c.Param("rep")
+
+	log.Printf("%v\n", toJSON(config.Replications))
+	for _, v := range config.Replications {
+		if v.Name == rep {
+			fmt.Printf("start get status")
+			v.mu.Lock()
+			fmt.Printf("start status %#v", v.Status)
+			c.JSON(200, v.Status)
+			v.mu.Unlock()
+			return
+		}
+	}
+	c.JSON(404, map[string]string{})
+}
+
+//InitAPI init http api
+func InitAPI(r *gin.Engine) {
+	r.GET("/status/:rep", GetStatus)
+}
+
+func startHTTP() {
+	eg := gin.Default()
+	InitAPI(eg)
+	err := eg.Run(":8081")
+	if err != nil {
+		panic(err)
+	}
+}
+
 func main() {
 	flag.Parse()
+	go startHTTP()
 	config.Init(configFile)
 	wait := sync.WaitGroup{}
 	for _, v := range config.Replications {
 		wait.Add(1)
+		fmt.Printf("start replication %#v", v)
 		go func(r *Replication) {
 			defer wait.Done()
 			r.Run()
