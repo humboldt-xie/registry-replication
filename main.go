@@ -306,7 +306,7 @@ func (rep *Replication) Run() error {
 		}
 		tags, err := repo.ListTag()
 		fmt.Printf("tag %v\n", tags)
-		time.Sleep(time.Second * 2)
+		time.Sleep(time.Second * time.Duration(delay))
 	}
 	return nil
 }
@@ -334,9 +334,11 @@ func (c *Config) Init(file string) {
 }
 
 var configFile string
+var delay int
 
 func init() {
 	flag.StringVar(&configFile, "config", "config.yaml", "config file ")
+	flag.IntVar(&delay, "delay", 10, "delay second to check all repository")
 }
 
 var config Config
