@@ -110,7 +110,7 @@ func (rep *Replication) CopyReposition(name string) error {
 	target, err := rep.Target.Repository(name)
 	sTags, err := source.ListTag()
 	if err != nil {
-		panic(err)
+		return err
 	}
 	status := rep.GetStatus(name)
 	for _, sTag := range sTags {
@@ -210,42 +210,55 @@ func (rep *Replication) pushManifest(target *registry.Repository, tag, digest st
 func (rep *Replication) transferLayers(src, target *registry.Repository, tag string, blobs []distribution.Descriptor) error {
 	repository := src.Name
 	// all blobs(layers and config)
-	for _, blob := range blobs {
-		digest := blob.Digest.String()
-		exist, err := target.BlobExist(digest)
-		if err != nil {
-			log.Errorf("an error occurred while checking existence of blob %s of %s:%s on destination registry: %v",
-				digest, repository, tag, err)
-			return err
-		}
-		if exist {
-			log.Infof("blob %s of %s:%s already exists on the destination registry, skip",
+	s := NewSemaphonre(10)
+	errs := make([]error, len(blobs))
+	for i, blob := range blobs {
+		s.Add()
+		go func(i int, blob distribution.Descriptor) {
+			defer s.Done()
+			digest := blob.Digest.String()
+			exist, err := target.BlobExist(digest)
+			if err != nil {
+				log.Errorf("an error occurred while checking existence of blob %s of %s:%s on destination registry: %v",
+					digest, repository, tag, err)
+				errs[i] = err
+			}
+			if exist {
+				log.Infof("blob %s of %s:%s already exists on the destination registry, skip",
+					digest, repository, tag)
+				return
+			}
+
+			log.Infof("transferring blob %s of %s:%s to the destination registry ...",
 				digest, repository, tag)
-			continue
-		}
+			size, data, err := src.PullBlob(digest)
+			if err != nil {
+				log.Errorf("an error occurred while pulling blob %s of %s:%s from the source registry: %v",
+					digest, repository, tag, err)
+				errs[i] = err
+				return
+			}
+			if data != nil {
+				defer data.Close()
+			}
+			log.Infof("transferring push blob %s ", digest)
 
-		log.Infof("transferring blob %s of %s:%s to the destination registry ...",
-			digest, repository, tag)
-		size, data, err := src.PullBlob(digest)
-		if err != nil {
-			log.Errorf("an error occurred while pulling blob %s of %s:%s from the source registry: %v",
-				digest, repository, tag, err)
-			return err
-		}
-		if data != nil {
-			defer data.Close()
-		}
-		log.Infof("transferring push blob %s ", digest)
-
-		if err = target.PushBlob(digest, size, data); err != nil {
-			log.Errorf("an error occurred while pushing blob %s of %s:%s to the distination registry: %v",
-				digest, repository, tag, err)
-			return err
-		}
-		log.Infof("blob %s of %s:%s transferred to the destination registry completed",
-			digest, repository, tag)
+			if err = target.PushBlob(digest, size, data); err != nil {
+				log.Errorf("an error occurred while pushing blob %s of %s:%s to the distination registry: %v",
+					digest, repository, tag, err)
+				errs[i] = err
+				return
+			}
+			log.Infof("blob %s of %s:%s transferred to the destination registry completed",
+				digest, repository, tag)
+		}(i, blob)
 	}
-
+	s.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -285,19 +298,25 @@ func (rep *Replication) Run() error {
 				status.Status = "pending"
 			}
 		}
+		s := NewSemaphonre(3)
 		for _, r := range repositories {
 			if !rep.hasProject(r) {
 				continue
 			}
-			status := rep.GetStatus(r)
-			status.Status = "coping"
-			if err := rep.CopyReposition(r); err != nil {
-				status.Status = "error"
-				status.Message = fmt.Sprintf("%s", err)
-			} else {
-				status.Status = "done"
-			}
+			s.Add()
+			go func(r string) {
+				defer s.Done()
+				status := rep.GetStatus(r)
+				status.Status = "coping"
+				if err := rep.CopyReposition(r); err != nil {
+					status.Status = "error"
+					status.Message = fmt.Sprintf("%s", err)
+				} else {
+					status.Status = "done"
+				}
+			}(r)
 		}
+		s.Wait()
 		fmt.Printf("repos %v\n", repositories)
 
 		repo, err := rep.Source.Repository(repositories[0])
