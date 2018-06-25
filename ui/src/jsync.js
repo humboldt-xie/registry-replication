@@ -1,14 +1,14 @@
-function jsync(events) {
+function jsync (events) {
   var object = {}
-  object.httpsEnabled = window.location.protocol == "https:";
-  object.args = window.location.search;
-  object.url = (object.httpsEnabled ? 'wss://' : 'ws://') + window.location.host + window.location.pathname + 'sync';
-  object.protocols = ['jsync'];
+  object.httpsEnabled = window.location.protocol === 'https:'
+  object.args = window.location.search
+  object.url = (object.httpsEnabled ? 'wss://' : 'ws://') + window.location.host + window.location.pathname + 'sync'
+  object.protocols = ['jsync']
   object.events = events || {}
-  object.autoReconnect = 1;
+  object.autoReconnect = 1
 
   object.openWs = function () {
-    object.ws = new WebSocket(object.url, object.protocols);
+    object.ws = new WebSocket(object.url, object.protocols)
 
     object.ws.onopen = function (event) {
       // object.ws.send("hello")
@@ -18,11 +18,11 @@ function jsync(events) {
     }
 
     object.ws.onmessage = function (event) {
-      var data = JSON.parse(event.data);
+      var data = JSON.parse(event.data)
       var callback = object.events[data.name] || function () {}
       callback(data.name, data.data)
       // object.callback(JSON.parse(data));
-      console.log(data);
+      console.log(data)
     }
 
     object.ws.onclose = function (event) {
@@ -38,15 +38,14 @@ function jsync(events) {
       data: data
     }
     object.ws.send(JSON.stringify(comand))
-
   }
 
   object.sendPing = function (ws) {
-    ws.send("1")
+    ws.send('1')
   }
 
   object.openWs()
-  return object;
+  return object
 }
 var myjsync = { jsync: jsync }
 

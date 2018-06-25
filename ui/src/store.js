@@ -43,7 +43,7 @@ const store = new Vuex.Store({
   mutations: {
     get (state) {
       jsync.jsync({
-        'status': function (name,resp) {
+        'status': function (name, resp) {
           state.statusData = resp
         }
       })
@@ -51,7 +51,7 @@ const store = new Vuex.Store({
       // state.count++
       axios.get('/status/test').then(function (res) {
         state.progress = getProgress(res.data)
-        //state.state.progress = 30
+        // state.state.progress = 30
         console.log(res, state.progress)
         // this.list = res.data.data.list
         // ref  list 引用了ul元素，我想把第一个li颜色变为红色

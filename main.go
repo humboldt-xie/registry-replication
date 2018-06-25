@@ -393,7 +393,6 @@ func (rep *Replication) replicate(reg *registry.Registry) error {
 		fmt.Printf("tag %v\n", tags)
 		time.Sleep(time.Second * time.Duration(delay))
 	}
-	return nil
 }
 
 //Run ...
